@@ -2,17 +2,13 @@ package burp;
 
 
 import burp.models.Vulnerability;
-import com.mashape.unirest.http.HttpResponse;
-import com.mashape.unirest.http.JsonNode;
-import com.mashape.unirest.http.async.Callback;
-import com.mashape.unirest.http.exceptions.UnirestException;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.HashSet;
 import java.util.Set;
 
-abstract class VulnersRestCallback implements Callback<JsonNode> {
+abstract class VulnersRestCallback {
 
 
     private IBurpExtenderCallbacks callbacks;
@@ -48,21 +44,6 @@ abstract class VulnersRestCallback implements Callback<JsonNode> {
     public void onFail(JSONObject responseData) {
         callbacks.printError(responseData.getString("error"));
     };
-
-    public void completed(HttpResponse<JsonNode> response) {
-        JSONObject responseBody = response.getBody().getObject();
-
-        if ("ERROR".equals(responseBody.getString("result"))) {
-            onFail((JSONObject) responseBody.get("data"));
-            return;
-        }
-
-        onSuccess(responseBody.getJSONObject("data"));
-    }
-
-    public void failed(UnirestException e) {
-        e.printStackTrace();
-    }
 
     public void cancelled() {}
 

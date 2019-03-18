@@ -5,7 +5,6 @@ import burp.models.Vulnerability;
 import com.codemagi.burp.ScanIssueConfidence;
 import com.codemagi.burp.ScanIssueSeverity;
 import com.google.common.base.Function;
-import com.google.common.base.Predicates;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.Ordering;
 import org.jtwig.environment.DefaultEnvironmentConfiguration;
@@ -26,7 +25,7 @@ public class SoftwareIssue implements IScanIssue {
     private final Software software;
     private final Environment environment;
 
-    SoftwareIssue(IHttpRequestResponse baseRequestResponse, IExtensionHelpers helpers, IBurpExtenderCallbacks callbacks, List<int[]> startStop, Software software) {
+    public SoftwareIssue(IHttpRequestResponse baseRequestResponse, IExtensionHelpers helpers, IBurpExtenderCallbacks callbacks, List<int[]> startStop, Software software) {
         this.baseRequestResponse = baseRequestResponse;
         this.helpers = helpers;
         this.callbacks = callbacks;

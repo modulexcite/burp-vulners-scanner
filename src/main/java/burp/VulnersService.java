@@ -9,21 +9,18 @@ import com.codemagi.burp.MatchRule;
 import com.codemagi.burp.ScanIssueConfidence;
 import com.codemagi.burp.ScanIssueSeverity;
 import com.google.common.util.concurrent.RateLimiter;
-import com.mashape.unirest.http.Unirest;
-import com.mashape.unirest.request.HttpRequest;
-import org.apache.http.HttpHost;
-import org.apache.http.impl.client.BasicCookieStore;
-import org.apache.http.impl.nio.client.CloseableHttpAsyncClient;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import javax.swing.table.DefaultTableModel;
+import java.io.IOException;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
+
 public class VulnersService {
 
-    private static String BURP_API_URL = "https://vulners.com/api/v3/burp/{path}/";
     private BurpExtender burpExtender;
     private final IBurpExtenderCallbacks callbacks;
     private final IExtensionHelpers helpers;
@@ -32,7 +29,9 @@ public class VulnersService {
 
     private final RateLimiter rateLimiter;
 
-    public VulnersService(BurpExtender burpExtender, IBurpExtenderCallbacks callbacks, IExtensionHelpers helpers, Map<String, Domain> domains, TabComponent tabComponent) {
+    private final HttpClient httpClient;
+
+    VulnersService(BurpExtender burpExtender, IBurpExtenderCallbacks callbacks, IExtensionHelpers helpers, Map<String, Domain> domains, TabComponent tabComponent) {
         this.burpExtender = burpExtender;
         this.callbacks = callbacks;
         this.helpers = helpers;
@@ -40,8 +39,7 @@ public class VulnersService {
         this.tabComponent = tabComponent;
         this.rateLimiter = RateLimiter.create(4.0);  // Count of max RPS
 
-        Unirest.setDefaultHeader("user-agent", "vulners-burpscanner-v-1.1");
-        Unirest.setAsyncHttpClient(HttpClient.createSSLClient());
+        this.httpClient = new HttpClient(callbacks, helpers, burpExtender);
     }
 
 
@@ -59,18 +57,15 @@ public class VulnersService {
         // TODO make non block MQ
         rateLimiter.acquire();
 
-        final HttpRequest request = Unirest.get(BURP_API_URL)
-                .routeParam("path", "software")
-                .queryString("software", software.getAlias())
-                .queryString("version", software.getVersion())
-                .queryString("type", software.getMatchType());
+        try {
+            if (software.getVersion() != null) {
+                JSONObject data = httpClient.get("software", new HashMap<String, String>(){{
+                    put("software", software.getAlias());
+                    put("version", software.getVersion());
+                    put("type", software.getMatchType());
+                }});
 
-        callbacks.printOutput("[Vulners] start check for domain " + domainName + " for software " + software.getName() + "/" + software.getVersion() + " : " + request.getUrl());
-
-        request.asJsonAsync(new VulnersRestCallback(callbacks) {
-
-            @Override
-            public void onScannerSuccess(Set<Vulnerability> vulnerabilities) {
+                Set<Vulnerability> vulnerabilities = getVulnerabilities(data);
 
                 for (Vulnerability vulnerability : vulnerabilities) {
                     // update cache
@@ -83,32 +78,19 @@ public class VulnersService {
 
                 // update gui component
                 tabComponent.getSoftwareTable().refreshTable(domains, tabComponent.getCbxSoftwareShowVuln().isSelected());
-
-
-                // add Burp issue
-                callbacks.addScanIssue(new SoftwareIssue(
-                        baseRequestResponse,
-                        helpers,
-                        callbacks,
-                        startStop,
-                        domains.get(domainName).getSoftware().get(software.getKey())
-                ));
             }
 
-            @Override
-            public void onFail(JSONObject error) {
-                // update gui component
-                tabComponent.getSoftwareTable().refreshTable(domains, tabComponent.getCbxSoftwareShowVuln().isSelected());
-
-                callbacks.addScanIssue(new SoftwareIssue(
-                        baseRequestResponse,
-                        helpers,
-                        callbacks,
-                        startStop,
-                        domains.get(domainName).getSoftware().get(software.getKey())
-                ));
-            }
-        });
+            // add Burp issue
+            callbacks.addScanIssue(new SoftwareIssue(
+                    baseRequestResponse,
+                    helpers,
+                    callbacks,
+                    startStop,
+                    domains.get(domainName).getSoftware().get(software.getKey())
+            ));
+        } catch (Exception e) {
+            callbacks.printError(e.getMessage());
+        }
     }
 
     /**
@@ -123,90 +105,90 @@ public class VulnersService {
         // TODO make non block MQ
         rateLimiter.acquire();
 
-        Unirest.get(BURP_API_URL)
-                .routeParam("path", "path")
-                .queryString("path", path)
-                .asJsonAsync(new VulnersRestCallback(callbacks) {
+        JSONObject data = httpClient.get("path", new HashMap<String, String>(){{
+            put("path", path);
+        }});
 
-                    @Override
-                    public void onScannerSuccess(Set<Vulnerability> vulnerabilities) {
+        Set<Vulnerability> vulnerabilities = getVulnerabilities(data);
 
-                        // update cache
-                        domains.get(domainName)
-                                .getPaths()
-                                .put(path, vulnerabilities);
+        if (vulnerabilities.isEmpty()) {
+            callbacks.printOutput("No Vulnerabilities - " + path);
+            return;
+        }
 
-                        // update gui component
-                        tabComponent.getPathsTable().getDefaultModel().addRow(new Object[]{
-                                domainName,
-                                path,
-                                Utils.getMaxScore(vulnerabilities),
-                                Utils.getVulnersList(vulnerabilities)
-                        });
+        // update cache
+        domains.get(domainName)
+                .getPaths()
+                .put(path, vulnerabilities);
 
-                        // add Burp issue
-                        callbacks.addScanIssue(new PathIssue(
-                                baseRequestResponse,
-                                helpers,
-                                callbacks,
-                                path,
-                                vulnerabilities
-                        ));
-                    }
-                });
+        // update gui component
+        tabComponent.getPathsTable().getDefaultModel().addRow(new Object[]{
+                domainName,
+                path,
+                Utils.getMaxScore(vulnerabilities),
+                Utils.getVulnersList(vulnerabilities)
+        });
+
+        // add Burp issue
+        callbacks.addScanIssue(new PathIssue(
+                baseRequestResponse,
+                helpers,
+                callbacks,
+                path,
+                vulnerabilities
+        ));
+    }
+
+    private Set<Vulnerability> getVulnerabilities(JSONObject data) {
+        Set<Vulnerability> vulnerabilities = new HashSet<>();
+
+        if (!data.has("search")) {
+            return vulnerabilities;
+        }
+
+        JSONArray bulletins = data.getJSONArray("search");
+        for (Object bulletin : bulletins) {
+            vulnerabilities.add(
+                new Vulnerability(((JSONObject) bulletin).getJSONObject("_source"))
+            );
+        }
+        return vulnerabilities;
     }
 
     /**
      * Check out rules for matching
      */
-    public void loadRules() {
-        Unirest.get(BURP_API_URL)
-                .routeParam("path", "rules")
-                .asJsonAsync(new VulnersRestCallback(callbacks) {
+    public void loadRules() throws IOException {
 
-                    @Override
-                    public void onSuccess(JSONObject data) {
-                        JSONObject rules = data.getJSONObject("rules");
-                        Iterator<String> ruleKeys = rules.keys();
+        JSONObject data = httpClient.get("rules", new HashMap<String, String>());
 
-                        DefaultTableModel ruleModel = tabComponent.getRulesTable().getDefaultModel();
-                        ruleModel.setRowCount(0); //reset table
-                        while (ruleKeys.hasNext()) {
-                            String key = ruleKeys.next();
-                            final JSONObject v = rules.getJSONObject(key);
+        JSONObject rules = data.getJSONObject("rules");
+        Iterator<String> ruleKeys = rules.keys();
 
-                            ruleModel.addRow(new Object[]{key, v.getString("regex"), v.getString("alias"), v.getString("type")});
+        DefaultTableModel ruleModel = tabComponent.getRulesTable().getDefaultModel();
+        ruleModel.setRowCount(0); //reset table
+        while (ruleKeys.hasNext()) {
+            String key = ruleKeys.next();
+            final JSONObject v = rules.getJSONObject(key);
 
-                            try {
-                                Pattern pattern = Pattern.compile(v.getString("regex"));
-                                System.out.println("[NEW] " + pattern);
+            ruleModel.addRow(new Object[]{key, v.getString("regex"), v.getString("alias"), v.getString("type")});
 
-                                burpExtender.getMatchRules().put(key, new HashMap<String, String>() {{
-                                    put("regex", v.getString("regex"));
-                                    put("alias", v.getString("alias"));
-                                    put("type", v.getString("type"));
-                                }});
-                                // Match group 1 - is important
-                                burpExtender.addMatchRule(new MatchRule(pattern, 1, key, ScanIssueSeverity.LOW, ScanIssueConfidence.CERTAIN));
-                            } catch (PatternSyntaxException pse) {
-                                callbacks.printError("Unable to compile pattern: " + v.getString("regex") + " for: " + key);
-                                burpExtender.printStackTrace(pse);
-                            }
-                        }
+            try {
+                Pattern pattern = Pattern.compile(v.getString("regex"));
+                System.out.println("[NEW] " + pattern);
 
-                    }
-                });
-    }
-
-    public static void buildHttpClient(String host, String port) {
-        try {
-            if ("".equals(host) && "".equals(port)) {
-                Unirest.setAsyncHttpClient(null);
-            } else {
-                Unirest.setAsyncHttpClient(HttpClient.createSSLClient(new HttpHost(host, Integer.valueOf(port))));
+                burpExtender.getMatchRules().put(key, new HashMap<String, String>() {{
+                    put("regex", v.getString("regex"));
+                    put("alias", v.getString("alias"));
+                    put("type", v.getString("type"));
+                }});
+                // Match group 1 - is important
+                burpExtender.addMatchRule(new MatchRule(pattern, 1, key, ScanIssueSeverity.LOW, ScanIssueConfidence.CERTAIN));
+            } catch (PatternSyntaxException pse) {
+                callbacks.printError("Unable to compile pattern: " + v.getString("regex") + " for: " + key);
+                burpExtender.printStackTrace(pse);
             }
-        } catch (Exception e) {
-            System.out.println("[Vulners] can't build HTTP client");
         }
     }
+
 }
